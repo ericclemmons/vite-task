@@ -28,10 +28,8 @@ pub(super) fn hash_file_content(path: &AbsolutePath, stream: impl io::Read) -> i
         return hash_content(io::empty());
     }
     if node_modules_bin::matches(path) {
-        return match node_modules_bin::shim_target(path, stream)? {
-            Some(target) => hash_content(target.as_str().as_bytes()),
-            None => hash_content(io::empty()),
-        };
+        let target = node_modules_bin::shim_target(path, stream)?;
+        return hash_content(target.as_ref().map_or("", |target| target.as_str()).as_bytes());
     }
     hash_content(stream)
 }
