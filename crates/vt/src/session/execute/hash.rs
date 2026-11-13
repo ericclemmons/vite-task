@@ -21,10 +21,15 @@ pub(super) fn hash_content(mut stream: impl io::Read) -> io::Result<u64> {
 
 /// Hash the content of the file at `path`, read from `stream`. Files whose
 /// content is noise hash as empty, so only whether they exist is
-/// fingerprinted; see [`super::redact`].
+/// fingerprinted, and pnpm's shims hash as what they run; see
+/// [`super::redact`].
 pub(super) fn hash_file_content(path: &AbsolutePath, stream: impl io::Read) -> io::Result<u64> {
-    if pnpm_modules_manifest::matches(path) || node_modules_bin::matches(path) {
+    if pnpm_modules_manifest::matches(path) {
         return hash_content(io::empty());
+    }
+    if node_modules_bin::matches(path) {
+        let target = node_modules_bin::shim_target(path, stream)?;
+        return hash_content(target.as_ref().map_or("", |target| target.as_str()).as_bytes());
     }
     hash_content(stream)
 }

@@ -1,6 +1,7 @@
 //! Files whose content carries noise — timestamps, machine-specific paths —
 //! that would otherwise cause cache misses without any meaningful change.
-//! Only whether they exist is fingerprinted.
+//! Only whether they exist is fingerprinted, or for pnpm's shims, what they
+//! run.
 //!
 //! To add another file, add a module here with a `matches` condition, and
 //! check it in [`hash_file_content`](super::hash::hash_file_content).
