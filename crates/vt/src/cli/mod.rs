@@ -3,7 +3,7 @@ use std::sync::Arc;
 use clap::Parser;
 use vt_graph::{TaskSpecifier, query::TaskQuery};
 use vt_path::AbsolutePath;
-use vt_plan::plan_request::{CacheOverride, PlanOptions, QueryPlanRequest};
+use vt_plan::plan_request::{AdhocPlanRequest, CacheOverride, PlanOptions, QueryPlanRequest};
 use vt_str::Str;
 use vt_workspace::package_filter::{PackageQueryArgs, PackageQueryError};
 
@@ -120,6 +120,7 @@ impl RunFlags {
 /// See <https://github.com/voidzero-dev/vite-task/issues/285>.
 #[derive(Debug, clap::Parser)]
 #[command(trailing_var_arg = true)]
+#[expect(clippy::struct_excessive_bools, reason = "CLI flags are naturally boolean")]
 pub struct RunCommand {
     #[clap(flatten)]
     pub(crate) flags: RunFlags,
@@ -146,9 +147,14 @@ pub struct RunCommand {
     #[clap(
         allow_hyphen_values = true,
         value_names = ["TASK_SPECIFIER", "ADDITIONAL_ARGS"],
-        long_help = "Task to run, as `packageName#taskName` or just `taskName`.\nAny arguments after the task name are forwarded to the task process.\nRunning `vp run` without a task name shows an interactive task selector."
+        long_help = "Task to run, as `packageName#taskName` or just `taskName`.\nAny arguments after the task name are forwarded to the task process.\nRunning `vp run` without a task name shows an interactive task selector.\nAfter `--`, a command to run as an ad-hoc task instead, like `vp run --cache -- node build.ts`."
     )]
     pub(crate) task_and_args: Vec<Str>,
+
+    /// Whether `task_and_args` came after `--`, making it a command rather than a task.
+    /// Clap drops that `--`, so [`Command::detect_adhoc_command`] sets this from the raw args.
+    #[clap(skip)]
+    pub(crate) adhoc: bool,
 }
 
 /// vite task CLI subcommands as parsed by clap.
@@ -169,6 +175,23 @@ pub enum Command {
 }
 
 impl Command {
+    /// Detects `vp run [flags] -- <command> [args...]`, which runs `<command>` as an ad-hoc
+    /// task instead of a task named `<command>`. `raw_args` are the args that were parsed
+    /// into this command.
+    ///
+    /// Clap drops a `--` that comes before the first positional argument, so the parsed
+    /// command can't tell `vp run -- build` from `vp run build`. The positional arguments
+    /// are always the last raw args, so this checks whether a `--` precedes them.
+    pub fn detect_adhoc_command<S: AsRef<std::ffi::OsStr>>(&mut self, raw_args: &[S]) {
+        let Self::Run(run) = self else { return };
+        let positional_count = run.task_and_args.len();
+        if positional_count == 0 || raw_args.len() <= positional_count {
+            return;
+        }
+        let separator_index = raw_args.len() - positional_count - 1;
+        run.adhoc = raw_args[separator_index].as_ref() == "--";
+    }
+
     /// Resolve the clap-parsed command into the dispatched [`ResolvedCommand`] enum.
     ///
     /// When `--last-details` is set on the `run` subcommand, this produces
@@ -223,6 +246,10 @@ pub struct ResolvedRunCommand {
 
     /// Whether the tasks run, and how their output is shown.
     pub mode: RunMode,
+
+    /// Whether `task_specifier` and `additional_args` are an ad-hoc command and its args
+    /// (`vp run -- <command>`) rather than a task.
+    pub adhoc: bool,
 }
 
 /// Whether a run runs its tasks. A dry run has no task output, so `--log`
@@ -313,7 +340,13 @@ impl RunCommand {
         let mut iter = self.task_and_args.into_iter();
         let task_specifier = iter.next();
         let additional_args: Vec<Str> = iter.collect();
-        ResolvedRunCommand { task_specifier, flags: self.flags, additional_args, mode }
+        ResolvedRunCommand {
+            task_specifier,
+            flags: self.flags,
+            additional_args,
+            mode,
+            adhoc: self.adhoc,
+        }
     }
 }
 
@@ -340,6 +373,21 @@ pub enum CLITaskQueryError {
 }
 
 impl ResolvedRunCommand {
+    /// The ad-hoc command of `vp run -- <command>`, or `None` if this runs tasks.
+    #[must_use]
+    pub fn adhoc_plan_request(&self) -> Option<AdhocPlanRequest> {
+        if !self.adhoc {
+            return None;
+        }
+        let program = self.task_specifier.clone()?;
+        Some(AdhocPlanRequest {
+            program,
+            args: self.additional_args.iter().cloned().collect(),
+            cache_override: self.flags.cache_override(),
+            remote_cache_mode: self.flags.remote_cache.map(Into::into),
+        })
+    }
+
     /// Convert to `QueryPlanRequest`, or return an error if invalid.
     ///
     /// # Errors

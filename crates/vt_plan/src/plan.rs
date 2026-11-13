@@ -15,7 +15,7 @@ use futures_util::FutureExt;
 use rustc_hash::FxHashMap;
 use vt_casefold::EnvName;
 use vt_graph::{
-    TaskId, TaskNode, TaskSource,
+    IndexedTaskGraph, TaskId, TaskNode, TaskSource,
     config::{
         CacheConfig, EnabledCacheConfig, GlobResolver, ResolvedGlobConfig,
         ResolvedGlobalCacheConfig, ResolvedTaskOptions,
@@ -35,9 +35,9 @@ use crate::{
     error::{CdCommandError, Error, PathFingerprintError, PathFingerprintErrorKind, PathType},
     execution_graph::{ExecutionGraph, ExecutionNodeIndex, InnerExecutionGraph},
     in_process::InProcessExecution,
-    path_env::get_path_env,
+    path_env::{get_path_env, prepend_path_env},
     plan_request::{
-        CacheOverride, PlanOptions, PlanRequest, QueryPlanRequest, ScriptCommand,
+        AdhocPlanRequest, CacheOverride, PlanOptions, PlanRequest, QueryPlanRequest, ScriptCommand,
         SyntheticPlanRequest,
     },
     remote_cache::{self, ResolvedRemoteCacheConfig},
@@ -589,6 +589,102 @@ pub fn plan_synthetic_request(
         program_path,
         args,
     )
+}
+
+/// Plan an ad-hoc command (`vp run -- <command>`) as a graph of one task, named after the
+/// command, in the package containing `cwd`.
+pub fn plan_adhoc_request(
+    request: AdhocPlanRequest,
+    workspace_path: &Arc<AbsolutePath>,
+    cwd: &Arc<AbsolutePath>,
+    envs: &Arc<FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>>,
+    indexed_task_graph: &IndexedTaskGraph<'_>,
+    glob_resolver: &GlobResolver,
+) -> Result<ExecutionGraph, Error> {
+    let AdhocPlanRequest { program, args, cache_override, remote_cache_mode } = request;
+
+    let package_graph = indexed_task_graph.package_graph();
+    let (package_name, package_path) = package_graph.get_package_index_from_cwd(cwd).map_or_else(
+        || (Str::default(), Arc::clone(workspace_path)),
+        |index| {
+            (
+                Str::from(indexed_task_graph.get_package_name(index)),
+                Arc::clone(indexed_task_graph.get_package_path(index)),
+            )
+        },
+    );
+
+    let mut envs = Arc::clone(envs);
+    prepend_path_env(Arc::make_mut(&mut envs), &package_path.join("node_modules").join(".bin"))
+        .map_err(|join_paths_error| Error::AddNodeModulesBinPath { join_paths_error })?;
+    if let Some(mode) = remote_cache_mode {
+        Arc::make_mut(&mut envs).insert(
+            EnvName::new(Arc::from(OsStr::new(remote_cache::MODE_ENV))),
+            Arc::from(OsStr::new(mode.as_str())),
+        );
+    }
+
+    let global_cache = crate::resolve_cache_with_override(
+        indexed_task_graph.global_cache_config().clone(),
+        cache_override,
+    );
+    let resolved_remote_cache = remote_cache::resolve(global_cache.remote_url.as_ref(), &envs)?;
+    // An ad-hoc command is cached like a package.json script.
+    let cache_config = if global_cache.scripts {
+        UserCacheConfig::with_config(EnabledCacheConfig::default())
+    } else {
+        UserCacheConfig::disabled()
+    };
+
+    let mut command = Str::from(shell_escape::escape(program.as_str().into()).as_ref());
+    for arg in args.iter() {
+        command.push(' ');
+        command.push_str(shell_escape::escape(arg.as_str().into()).as_ref());
+    }
+
+    let cwd_for_cache = strip_prefix_for_cache(cwd, workspace_path)
+        .map_err(|kind| PathFingerprintError { kind, path_type: PathType::Cwd })?;
+    let execution_cache_key = ExecutionCacheKey::ExecAPI(
+        [Str::from("run --"), Str::from(cwd_for_cache.as_str()), program.clone()]
+            .into_iter()
+            .chain(args.iter().cloned())
+            .collect(),
+    );
+
+    let spawn_execution = plan_synthetic_request(
+        workspace_path,
+        &BTreeMap::new(),
+        SyntheticPlanRequest {
+            program: Arc::from(OsStr::new(program.as_str())),
+            args,
+            cache_config,
+            envs,
+        },
+        Some(execution_cache_key),
+        cwd,
+        &package_path,
+        ParentCacheConfig::None,
+        resolved_remote_cache.as_ref(),
+        glob_resolver,
+    )?;
+
+    let task_display =
+        vt_graph::display::TaskDisplay { package_name, task_name: command.clone(), package_path };
+    let task_execution = TaskExecution {
+        task_display: task_display.clone(),
+        items: vec![ExecutionItem {
+            execution_item_display: ExecutionItemDisplay {
+                task_display,
+                command,
+                cwd: Arc::clone(cwd),
+            },
+            kind: ExecutionItemKind::Leaf(LeafExecutionKind::Spawn(spawn_execution)),
+        }],
+    };
+    let mut inner_graph = InnerExecutionGraph::with_capacity(1, 0);
+    inner_graph.add_node(task_execution);
+    Ok(ExecutionGraph::try_from_graph(inner_graph, crate::DEFAULT_CONCURRENCY_LIMIT)
+        .expect("a graph of one task has no cycle"))
 }
 
 fn strip_prefix_for_cache(

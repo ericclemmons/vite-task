@@ -1,0 +1,75 @@
+[[e2e]]
+name = "adhoc_command___cached_with_auto_inputs_and_outputs"
+comment = """
+`vt run --cache -- <command>` runs a command that no task defines, cached like a script: inputs and outputs are tracked automatically.
+"""
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "--cache",
+    "--",
+    "vtt",
+    "fs",
+    "read",
+    "src/input.txt",
+    "write",
+    "output.txt",
+    "built",
+  ], comment = "first run — cache miss" },
+  { argv = [
+    "vtt",
+    "rm",
+    "output.txt",
+  ], comment = "delete the output to prove the restore is real" },
+  { argv = [
+    "vt",
+    "run",
+    "--cache",
+    "--",
+    "vtt",
+    "fs",
+    "read",
+    "src/input.txt",
+    "write",
+    "output.txt",
+    "built",
+  ], comment = "second run — cache hit, restores the output" },
+  { argv = [
+    "vtt",
+    "print-file",
+    "output.txt",
+  ], comment = "output restored from the cache" },
+  [
+    "vtt",
+    "replace-file-content",
+    "src/input.txt",
+    "initial",
+    "modified",
+  ],
+  { argv = [
+    "vt",
+    "run",
+    "--cache",
+    "--",
+    "vtt",
+    "fs",
+    "read",
+    "src/input.txt",
+    "write",
+    "output.txt",
+    "built",
+  ], comment = "cache miss: the input changed" },
+  { argv = [
+    "vt",
+    "run",
+    "--",
+    "vtt",
+    "fs",
+    "read",
+    "src/input.txt",
+    "write",
+    "output.txt",
+    "built",
+  ], comment = "without `--cache`, an ad-hoc command is uncached, like a script" },
+]

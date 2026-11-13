@@ -18,8 +18,10 @@ pub use error::Error;
 pub use execution_graph::{DEFAULT_CONCURRENCY_LIMIT, ExecutionGraph};
 pub use in_process::InProcessExecution;
 pub use path_env::{get_path_env, prepend_path_env};
-use plan::{ParentCacheConfig, plan_query_request, plan_synthetic_request};
-use plan_request::{CacheOverride, PlanRequest, QueryPlanRequest, SyntheticPlanRequest};
+use plan::{ParentCacheConfig, plan_adhoc_request, plan_query_request, plan_synthetic_request};
+use plan_request::{
+    AdhocPlanRequest, CacheOverride, PlanRequest, QueryPlanRequest, SyntheticPlanRequest,
+};
 use rustc_hash::FxHashMap;
 use serde::{Serialize, ser::SerializeMap as _};
 use vt_casefold::EnvName;
@@ -218,6 +220,31 @@ pub async fn plan_query(
         Arc::clone(&query),
     );
     plan_query_request(query, plan_options, context).await
+}
+
+/// Plan an ad-hoc command, like `vp run --cache -- node build.ts`, as a graph of one task.
+///
+/// # Errors
+/// Returns an error if the program is not found, the remote cache env is invalid, or path
+/// fingerprinting fails.
+#[tracing::instrument(level = "debug", skip_all)]
+#[expect(clippy::implicit_hasher, reason = "FxHashMap is the only hasher used in this codebase")]
+pub fn plan_adhoc(
+    adhoc_plan_request: AdhocPlanRequest,
+    workspace_path: &Arc<AbsolutePath>,
+    cwd: &Arc<AbsolutePath>,
+    envs: &Arc<FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>>,
+    indexed_task_graph: &IndexedTaskGraph<'_>,
+    glob_resolver: &GlobResolver,
+) -> Result<ExecutionGraph, Error> {
+    plan_adhoc_request(
+        adhoc_plan_request,
+        workspace_path,
+        cwd,
+        envs,
+        indexed_task_graph,
+        glob_resolver,
+    )
 }
 
 fn resolve_cache_with_override(

@@ -31,7 +31,8 @@ use vt_path::{AbsolutePath, AbsolutePathBuf};
 use vt_plan::{
     ExecutionGraph,
     plan_request::{
-        PlanOptions, PlanRequest, QueryPlanRequest, ScriptCommand, SyntheticPlanRequest,
+        CacheOverride, PlanOptions, PlanRequest, QueryPlanRequest, ScriptCommand,
+        SyntheticPlanRequest,
     },
     prepend_path_env,
 };
@@ -146,7 +147,8 @@ impl vt_plan::PlanRequestParser for PlanRequestParser<'_> {
     ) -> anyhow::Result<Option<PlanRequest>> {
         match self.command_handler.handle_command(command).await? {
             HandledCommand::Synthesized(synthetic) => Ok(Some(PlanRequest::Synthetic(synthetic))),
-            HandledCommand::ViteTaskCommand(cli_command) => {
+            HandledCommand::ViteTaskCommand(mut cli_command) => {
+                cli_command.detect_adhoc_command(&command.args);
                 match cli_command.into_resolved(&command.program)? {
                     ResolvedCommand::Cache { .. }
                     | ResolvedCommand::RunLastDetails
@@ -161,6 +163,24 @@ impl vt_plan::PlanRequestParser for PlanRequestParser<'_> {
                         Ok(Some(PlanRequest::Synthetic(
                             command.to_synthetic_plan_request(UserCacheConfig::disabled()),
                         )))
+                    }
+                    // A nested ad-hoc command (`vp run -- <command>`) is a synthetic
+                    // task, cached as the enclosing task is.
+                    ResolvedCommand::Run(run_command) if run_command.adhoc => {
+                        let Some(adhoc) = run_command.adhoc_plan_request() else {
+                            unreachable!("an ad-hoc run has a command");
+                        };
+                        let cache_config = if adhoc.cache_override == CacheOverride::ForceDisabled {
+                            UserCacheConfig::disabled()
+                        } else {
+                            UserCacheConfig::Bool(true)
+                        };
+                        Ok(Some(PlanRequest::Synthetic(SyntheticPlanRequest {
+                            program: Arc::from(OsStr::new(adhoc.program.as_str())),
+                            args: adhoc.args,
+                            cache_config,
+                            envs: Arc::clone(&command.envs),
+                        })))
                     }
                     ResolvedCommand::Run(run_command) => {
                         match run_command.into_query_plan_request(&command.cwd) {
@@ -931,6 +951,18 @@ impl<'a> Session<'a> {
         cwd: Arc<AbsolutePath>,
         command: crate::cli::ResolvedRunCommand,
     ) -> Result<(vt_plan::PlanResult, bool), vt_plan::Error> {
+        if let Some(adhoc_plan_request) = command.adhoc_plan_request() {
+            let task_graph = self.task_graph.get().await?;
+            let graph = vt_plan::plan_adhoc(
+                adhoc_plan_request,
+                &self.workspace_path,
+                &cwd,
+                &self.envs,
+                task_graph,
+                &self.glob_resolver,
+            )?;
+            return Ok((vt_plan::PlanResult { graph, no_packages_matched: false }, false));
+        }
         let (query_plan_request, is_cwd_only) = match command.into_query_plan_request(&cwd) {
             Ok(result) => result,
             Err(crate::cli::CLITaskQueryError::MissingTaskSpecifier) => {

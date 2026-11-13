@@ -10,7 +10,9 @@ fn main() -> ! {
 }
 
 async fn run() -> ExitStatus {
-    let args = Command::parse();
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut args = Command::parse_from(&raw_args);
+    args.detect_adhoc_command(&raw_args);
     let mut owned_config = OwnedSessionConfig::default();
     let session = match Session::init(owned_config.as_config()) {
         Ok(session) => session,

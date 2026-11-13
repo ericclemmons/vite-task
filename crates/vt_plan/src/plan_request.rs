@@ -101,6 +101,22 @@ pub struct SyntheticPlanRequest {
     pub envs: Arc<FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>>,
 }
 
+/// The request to run a command that no task defines, like `vp run --cache -- node build.ts`.
+///
+/// It runs in the cwd like a package.json script of the package containing the cwd: it's
+/// cached when `cache.scripts` is enabled or `--cache` is passed, with inputs and outputs
+/// tracked automatically.
+#[derive(Debug)]
+pub struct AdhocPlanRequest {
+    /// The program to execute, looked up in `PATH` and the package's `node_modules/.bin`.
+    pub program: Str,
+    /// The arguments to pass to the program.
+    pub args: Arc<[Str]>,
+    pub cache_override: CacheOverride,
+    /// The `--remote-cache` flag. `None` when the flag isn't passed.
+    pub remote_cache_mode: Option<crate::remote_cache::RemoteCacheMode>,
+}
+
 #[derive(Debug)]
 pub enum PlanRequest {
     /// The request to run tasks queried from the task graph, like `vp run ...`.
